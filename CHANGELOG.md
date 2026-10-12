@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The offline baseline catalog no longer leaks models the workspace does not
+  allow. `MODELS` is merged *under* the fetched catalog by pi's
+  `createProvider`, so a network refresh can never drop a baseline entry —
+  `filterModels` was the only thing standing between the user and a model the
+  workspace has disabled (`deepseek-v4.1-flash` and `glm-5.3-flash` shipped
+  with the extension while most workspaces can only call free-tier models, and
+  the gateway answers `403 Model access is disabled`).
+  `filterModels` consulted `credential.allowedModels`, but that list is only
+  recomputed by `refreshZenToken`, which pi invokes when the OAuth *token*
+  expires — so it stays stale for the whole token lifetime. An empty list
+  recorded while the BYOK check was still broken (1.2.4) was enough to disable
+  workspace filtering entirely. The extension now keeps the last successful
+  `/api/config` result and prefers it, which self-heals on the first refresh
+  instead of the next re-login. API-key credentials are never narrowed by it,
+  and the "unknown allowed-set means never wipe the catalog" guard is unchanged.
+
 ## 1.2.6
 
 ### Changed

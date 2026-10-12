@@ -10,6 +10,7 @@ import { INFERENCE_URL, MODELS, modelFromZen, type ZenApi } from "./models.ts";
 import { freeTierHeaders, isZeroCostModel } from "./free-tier.ts";
 import { buildTextToolProtocol, convertTextToolMessage, shapeFreeTierRequest } from "./v2-gate.ts";
 import { UA, fetchZenModels, loginZen, refreshZenToken, type ZenCredential } from "./auth.ts";
+import { getLiveCatalog, setLiveCatalog } from "./catalog-state.ts";
 
 function withFreeTierGate<T extends object>(streams: T): T {
 	const s = streams as unknown as Record<string, (...args: never[]) => unknown>;
@@ -78,15 +79,28 @@ export const provider = createProvider<ZenApi>({
 		const credential = context.credential as ZenCredential | undefined;
 		if (!context.allowNetwork || credential?.type !== "oauth" || !credential.orgID) return [];
 		const entries = await fetchZenModels(credential.access, credential.orgID, context.signal);
+		// remember it so filterModels can drop baseline models this workspace
+		// does not allow, without waiting for a token refresh to rewrite
+		// credential.allowedModels (see catalog-state.ts)
+		setLiveCatalog(Object.keys(entries));
 		return Object.entries(entries).map(([id, meta]) => modelFromZen(id, meta));
 	},
 	filterModels: (models, credential) => {
-		// an empty allowed list means "no usable workspace restrictions" — never
-		// wipe the catalog (that was the "logged in, no models" bug)
-		const allowed = (credential as ZenCredential | undefined)?.allowedModels;
-		return Array.isArray(allowed) && allowed.length > 0
-			? models.filter((m) => allowed.includes(m.id))
-			: models;
+		const zen = credential as ZenCredential | undefined;
+		// API-key users carry their own workspace's permissions — narrowing for
+		// them with an OAuth catalog would hide models they can actually call
+		if (zen?.type !== "oauth") return models;
+		// the live catalog is fresher than the credential's list, which only
+		// moves when the token itself expires
+		const allowed =
+			getLiveCatalog() ??
+			(Array.isArray(zen.allowedModels) && zen.allowedModels.length > 0
+				? new Set<string>(zen.allowedModels)
+				: undefined);
+		// nothing known yet (offline, first run) means "no usable workspace
+		// restrictions" — never wipe the catalog (that was the "logged in, no
+		// models" bug)
+		return allowed ? models.filter((m) => allowed.has(m.id)) : models;
 	},
 	api: {
 		// the gate fires for zero-cost models only; google has none today
