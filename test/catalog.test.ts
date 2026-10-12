@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { allowedModelIDs, fetchZenModels, loginZen } from "../src/auth.ts";
+import { resetLiveCatalog } from "../src/catalog-state.ts";
 import { provider } from "../src/extension.ts";
 import { INFERENCE_URL, MODELS, modelFromZen, resolveZenRoute } from "../src/models.ts";
 
@@ -28,10 +29,15 @@ function mockFetch() {
 
 afterEach(() => {
 	globalThis.fetch = realFetch;
+	resetLiveCatalog();
 });
 
 const oauth = (allowedModels?: string[]) =>
 	({ type: "oauth", refresh: "r", access: "a", expires: 0, allowedModels }) as any;
+
+// Same shape loginZen produces — fetchModels bails without an org id.
+const workspaceOAuth = (allowedModels?: string[]) =>
+	({ type: "oauth", refresh: "r", access: "a", expires: 0, orgID: "wrk_1", allowedModels }) as any;
 
 describe("empty allowedModels never wipes the catalog", () => {
 	test("empty array passes every model through", () => {
@@ -47,6 +53,79 @@ describe("empty allowedModels never wipes the catalog", () => {
 	test("a non-empty list still narrows the catalog", () => {
 		const visible = provider.filterModels?.(MODELS, oauth(["glm-5.3-flash"]));
 		expect(visible?.map((m: any) => m.id)).toEqual(["glm-5.3-flash"]);
+	});
+});
+
+// pi's createProvider merges `models:` (the offline baseline) *under* the
+// fetched catalog and a network refresh can never drop a baseline entry, so
+// filtering is the only thing standing between the user and models their
+// workspace does not allow. The live fetch result is the fresher signal:
+// credential.allowedModels only moves when the OAuth token itself expires.
+describe("the offline baseline cannot leak past a successful fetch", () => {
+	const configResponse = (models: Record<string, unknown>) => ({
+		body: { config: { provider: { opencode: { models } } } },
+	});
+
+	// createProvider folds fetchModels into refreshModels and does not expose it,
+	// so drive the provider the way pi does: a publication callback plus network
+	// permission and no stored snapshot to restore from.
+	const fetchCatalog = async (models: Record<string, unknown>) => {
+		mockFetch();
+		responses.push(() => configResponse(models));
+		await provider.refreshModels?.({
+			credential: workspaceOAuth(),
+			allowNetwork: true,
+			publish: async () => true,
+			signal: new AbortController().signal,
+		});
+	};
+
+	// what pi hands filterModels: baseline first, fetched models replacing
+	// same-id baseline entries
+	const merged = (fetched: { id: string }[]) => {
+		const out = [...MODELS];
+		for (const model of fetched) {
+			const index = out.findIndex((m: any) => m.id === model.id);
+			index >= 0 ? (out[index] = model as any) : out.push(model as any);
+		}
+		return out;
+	};
+
+	test("baseline models the workspace does not allow disappear", async () => {
+		await fetchCatalog({ "space-bunny-free": { cost: { input: 0, output: 0 } } });
+		const fetched = [modelFromZen("space-bunny-free", { cost: { input: 0, output: 0 } })];
+		// the baseline leaks two paid models this workspace has disabled
+		expect(MODELS.map((m: any) => m.id)).toContain("deepseek-v4.1-flash");
+		const visible = provider.filterModels?.(merged(fetched), workspaceOAuth([]));
+		expect(visible?.map((m: any) => m.id)).toEqual(["space-bunny-free"]);
+	});
+
+	test("a stale empty allowedModels no longer disables workspace filtering", async () => {
+		await fetchCatalog({ "space-bunny-free": { cost: { input: 0, output: 0 } } });
+		const fetched = [modelFromZen("space-bunny-free", { cost: { input: 0, output: 0 } })];
+		const visible = provider.filterModels?.(merged(fetched), workspaceOAuth([]));
+		expect(visible?.map((m: any) => m.id)).toEqual(["space-bunny-free"]);
+	});
+
+	test("the live catalog wins over a stale non-empty allowedModels", async () => {
+		await fetchCatalog({ "space-bunny-free": { cost: { input: 0, output: 0 } } });
+		const fetched = [modelFromZen("space-bunny-free", { cost: { input: 0, output: 0 } })];
+		// allowedModels still names a baseline model, last read at token refresh
+		const visible = provider.filterModels?.(merged(fetched), workspaceOAuth(["glm-5.3-flash"]));
+		expect(visible?.map((m: any) => m.id)).toEqual(["space-bunny-free"]);
+	});
+
+	test("offline with no successful fetch still keeps the baseline", () => {
+		// nothing known yet — the anti-wipe guard, unchanged
+		expect(provider.filterModels?.(MODELS, workspaceOAuth([]))?.length).toBe(MODELS.length);
+		expect(provider.filterModels?.(MODELS, workspaceOAuth(undefined))?.length).toBe(MODELS.length);
+	});
+
+	test("API-key credentials are never narrowed by the OAuth catalog", async () => {
+		await fetchCatalog({ "space-bunny-free": { cost: { input: 0, output: 0 } } });
+		const apiKey = { type: "api_key", key: "k" } as any;
+		const visible = provider.filterModels?.(merged([]), apiKey);
+		expect(visible?.map((m: any) => m.id)).toEqual(MODELS.map((m: any) => m.id));
 	});
 });
 
