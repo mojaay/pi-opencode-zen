@@ -79,10 +79,24 @@ export function resolveZenRoute(id: string, meta: ZenModelMeta): ZenRoute | unde
 	return { api, baseUrl };
 }
 
+// Zero-cost models are not all served over the same protocol. The v2 content
+// gate applies to the Responses API, so it is tempting to route every free
+// model there — but the gateway answers `400 ModelProtocolUnsupported` for
+// anything outside the gpt/grok/muse families (`big-pickle`, `cat-jam-free`,
+// `space-bunny-free`, `nemotron-*` all verified). The console hands out an
+// `…/inference/openai/v1` URL for them, which `apiFromUrl` cannot tell apart
+// from a genuine Chat Completions entry, so pick the free-model route from the
+// model id with the same rule the paid pool uses.
+function freeRoute(id: string): ZenRoute {
+	return RESPONSES_MODEL.test(id)
+		? { api: "openai-responses", baseUrl: INFERENCE_URL }
+		: { api: "openai-completions", baseUrl: INFERENCE_URL };
+}
+
 export function modelFromZen(id: string, meta: ZenModelMeta): Model<ZenApi> {
 	const cost = meta.cost ?? { input: 0, output: 0, cache_read: 0 };
 	const free = meta.cost !== undefined && (cost.input ?? 0) <= 0 && (cost.output ?? 0) <= 0;
-	const route = free ? { api: "openai-responses" as const, baseUrl: INFERENCE_URL } :
+	const route = free ? freeRoute(id) :
 		(resolveZenRoute(id, meta) ?? { api: "openai-completions" as const, baseUrl: INFERENCE_URL });
 	return {
 		id,

@@ -240,12 +240,26 @@ describe("allowedModelIDs", () => {
 		expect(await allowedModelIDs("tok", "wrk_1")).toEqual(["big-pickle"]);
 	});
 
-	test("routes free models through OpenAI Responses regardless of catalog provider override", () => {
-		const model = modelFromZen("big-pickle", {
-			cost: { input: 0, output: 0 },
-			provider: { npm: "@ai-sdk/openai-compatible", api: "https://opencode.ai/inference/openai/v1" },
-		});
-		expect(model.api).toBe("openai-responses");
+	// The gateway serves the Responses protocol only for the gpt/grok/muse
+	// families; it answers `400 ModelProtocolUnsupported` for the rest
+	// (verified for big-pickle, cat-jam-free, space-bunny-free and
+	// nemotron-3-ultra-free), so a zero-cost model must not be forced there.
+	test("keeps non-Responses free models on Chat Completions", () => {
+		const override = { npm: "@ai-sdk/openai-compatible", api: "https://opencode.ai/inference/openai/v1" };
+		for (const id of ["big-pickle", "cat-jam-free", "space-bunny-free", "nemotron-3-ultra-free", "exo-free"]) {
+			expect(modelFromZen(id, { cost: { input: 0, output: 0 }, provider: override }).api).toBe(
+				"openai-completions",
+			);
+		}
+	});
+
+	test("still routes the gpt/grok/muse free families through OpenAI Responses", () => {
+		const override = { npm: "@ai-sdk/openai-compatible", api: "https://opencode.ai/inference/openai/v1" };
+		for (const id of ["muse-spark-1.3-contributor-free", "gpt-5.1-codex-free", "grok-4-free"]) {
+			expect(modelFromZen(id, { cost: { input: 0, output: 0 }, provider: override }).api).toBe(
+				"openai-responses",
+			);
+		}
 	});
 
 	test("empty config returns no models", async () => {
