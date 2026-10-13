@@ -7,7 +7,7 @@ import {
 	openAIResponsesApi,
 } from "@earendil-works/pi-ai/compat";
 import { INFERENCE_URL, MODELS, modelFromZen, type ZenApi } from "./models.ts";
-import { freeTierHeaders, isZeroCostModel } from "./free-tier.ts";
+import { freeTierHeaders, applyToolPairGate, isZeroCostModel } from "./free-tier.ts";
 import { buildTextToolProtocol, convertTextToolMessage, shapeFreeTierRequest } from "./v2-gate.ts";
 import { UA, fetchZenModels, loginZen, refreshZenToken, type ZenCredential } from "./auth.ts";
 
@@ -25,9 +25,15 @@ function withFreeTierGate<T extends object>(streams: T): T {
 		return fn(model, context, {
 			...requestOptions,
 			onPayload: async (payload: unknown, m: unknown) => {
-				const next = free && (m as { api?: string })?.api === "openai-responses"
-					? shapeFreeTierRequest(payload as Record<string, any>)
-					: payload;
+				const api = (m as { api?: string })?.api;
+				// the Responses route needs the v2 marker gate; the Chat
+				// Completions route needs the read + exec tool pair, without
+				// which every tool-less request (compaction) is rejected
+				let next: unknown = payload;
+				if (free) {
+					if (api === "openai-responses") next = shapeFreeTierRequest(payload as Record<string, any>);
+					else next = applyToolPairGate(payload as Record<string, unknown>, api, m as never) ?? payload;
+				}
 				return caller ? caller(next, m) : next;
 			},
 		} as never);
